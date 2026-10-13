@@ -716,10 +716,12 @@ class RemoteControl {
         // Terminal
         document.getElementById('terminal-toggle-btn').addEventListener('click', () => this.toggleTerminal());
         document.getElementById('clear-btn').addEventListener('click', () => this.clearTerminal());
+        document.getElementById('terminal-command-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            this.sendCommand();
+        });
         document.getElementById('terminal-input').addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                this.sendCommand();
-            } else if (e.key === 'ArrowUp') {
+            if (e.key === 'ArrowUp') {
                 e.preventDefault();
                 this.navigateHistory('up');
             } else if (e.key === 'ArrowDown') {
@@ -1218,9 +1220,12 @@ class RemoteControl {
         window.addEventListener('hashchange', () => {
             this.restoreFromHash();
         });
+        this.workspaceReady = true;
+        window.dispatchEvent(new Event('remote-control-ready'));
     }
 
-    switchTab(tabName, skipHashUpdate = false) {
+    switchTab(tabName, skipHashUpdate = false, loadTab = true) {
+        if (!['docker','images','compose'].includes(tabName)) this.showDockerError('');
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
 
@@ -1252,12 +1257,14 @@ class RemoteControl {
             this.loadDockerInfo();
             this.loadDockerContainers();
         } else if (tabName === 'images') {
+            this.loadDockerInfo();
             this.loadDockerImages();
         } else if (tabName === 'compose') {
+            this.loadDockerInfo();
             this.loadComposeStatus();
             this.renderComposeHistory();
         } else if (tabName === 'files') {
-            this.loadFiles();
+            if (loadTab) this.loadFiles();
         }
 
         // 更新 URL hash（除非是从 hash 恢复时调用）
@@ -1450,6 +1457,10 @@ class RemoteControl {
         }
 
         if (!state || state.locked !== true) return true;
+        if (this.platform === 'macOS') {
+            this.showToast('Mac 已锁屏，请先在电脑上解锁', 'warning');
+            return false;
+        }
 
         const password = await this.showDialog(
             `远程桌面当前处于锁定/登录界面（${state.desktop}）。输入该机器的登录口令以解锁：`,
@@ -1542,8 +1553,13 @@ class RemoteControl {
             fps: this.qualitySettings.fps || '50'
         });
 
-        // Strategy: WebCodecs (lowest latency) > MSE > Simple video.src
+        // Mac Agent currently provides JPEG frames; the Windows H.264 route is unavailable.
         let started = false;
+        if (this.platform === 'macOS') {
+            this.startLegacyStream();
+            this.updateModeIndicator('mjpeg');
+            started = true;
+        }
 
         // 1. Try WebCodecs + Canvas (Chrome/Edge, ~60ms latency)
         if (!started && 'VideoDecoder' in window && typeof MP4Box !== 'undefined') {
@@ -2536,7 +2552,7 @@ class RemoteControl {
             toggleBtn.classList.remove('btn-primary');
             toggleBtn.classList.add('btn-danger');
             terminalSelect.disabled = true;  // 连接时禁用切换
-            output.innerHTML = '';
+            output.textContent = '已连接。输入命令后按回车或点“发送”。\n';
         };
 
         this.websocket.onmessage = (event) => {
@@ -2686,7 +2702,7 @@ class RemoteControl {
             });
         }
 
-        // Linux 平台隐藏远程桌面视频流标签页（该功能已禁用）
+        // Linux 没有桌面代理；Mac 使用 MJPEG，Windows 使用 H.264。
         const screenshotTabBtn = document.querySelector('.tab[data-tab="screenshot"]');
         if (screenshotTabBtn) {
             screenshotTabBtn.style.display = info.platform === 'Linux' ? 'none' : '';
@@ -2695,7 +2711,7 @@ class RemoteControl {
         // 根据平台动态设置终端类型选择框
         const terminalSelect = document.getElementById('terminal-type');
         if (terminalSelect) {
-            const isLinux = info.platform === 'Linux';
+            const isLinux = info.platform !== 'Windows';
             Array.from(terminalSelect.options).forEach(opt => {
                 if (isLinux) {
                     opt.style.display = opt.value === 'shell' ? '' : 'none';
@@ -2731,7 +2747,20 @@ class RemoteControl {
     }
 
     async loadProcesses() {
-        this.setRefreshState('refresh-processes-btn', true);
+        if (this.processesLoading) return;
+        this.processesLoading = true;
+        const initial = this.processes.length === 0;
+        const loader = document.getElementById('processes-initial-loading');
+        const table = document.getElementById('processes-table');
+        const count = document.querySelector('#processes-tab .processes-info');
+        const refresh = document.getElementById('refresh-processes-btn');
+        let failed = false;
+        if (initial) {
+            if (loader) {loader.hidden = false;loader.querySelector('.processes-loading-spinner').hidden = false;loader.querySelector('.processes-loading-label').textContent = '正在加载进程…';}
+            if (table) table.hidden = true;
+            if (count) count.hidden = true;
+            if (refresh) refresh.disabled = true;
+        } else this.setRefreshState('refresh-processes-btn', true);
         try {
             const response = await fetch('/api/system/processes', {
                 headers: { 'Authorization': `Bearer ${this.token}` }
@@ -2739,12 +2768,17 @@ class RemoteControl {
 
             if (response.ok) {
                 var data = await response.json();
-                this.processes = data.data;
+                this.processes = data.data || [];
                 this.renderProcesses();
-            }
+            } else throw new Error(`进程列表请求失败 (${response.status})`);
         } catch (error) {
+            failed = true;
             console.error('Failed to load processes:', error);
+            if (initial && loader) {loader.querySelector('.processes-loading-spinner').hidden = true;loader.querySelector('.processes-loading-label').textContent = '加载失败，请点击右上角刷新重试';}
         } finally {
+            this.processesLoading = false;
+            if (initial && !failed) {if (loader) loader.hidden = true;if (table) table.hidden = false;if (count) count.hidden = false;}
+            if (refresh) refresh.disabled = false;
             this.setRefreshState('refresh-processes-btn', false);
         }
     }
@@ -2893,18 +2927,34 @@ class RemoteControl {
 
             if (response.ok) {
                 const info = await response.json();
+                if (!info.serverVersion) {
+                    this.showDockerError('服务端未连接到 Docker；当前显示的 0 不是实际容器或镜像数量。请检查 DockerPath 和 Docker Desktop 的访问权限。');
+                    return;
+                }
+                this.showDockerError('');
                 document.getElementById('docker-containers-total').textContent = info.containers;
                 document.getElementById('docker-containers-running').textContent = info.containersRunning;
                 document.getElementById('docker-containers-paused').textContent = info.containersPaused;
                 document.getElementById('docker-containers-stopped').textContent = info.containersStopped;
                 document.getElementById('docker-images-total').textContent = info.images;
                 document.getElementById('docker-version').textContent = info.serverVersion;
+            } else {
+                const failure = await response.json().catch(() => ({}));
+                this.showDockerError(failure.message || '无法连接 Docker，请检查 Docker Desktop 与服务进程权限。');
             }
         } catch (error) {
             console.error('Failed to load docker info:', error);
+            this.showDockerError('无法读取 Docker 状态，请检查 Docker Desktop 是否运行。');
         } finally {
             this.setRefreshState('refresh-docker-info-btn', false);
         }
+    }
+
+    showDockerError(message) {
+        const banner = document.getElementById('docker-connection-error');
+        if (!banner || (message && !['docker','images','compose'].includes(this.currentTab))) return;
+        banner.textContent = message;
+        banner.hidden = !message;
     }
 
     async loadDockerContainers() {
@@ -3653,6 +3703,10 @@ volumes:
      */
     updateHash() {
         const tab = this.currentTab || 'controls';
+        if (window.RemoteToolWorkspace) {
+            window.RemoteToolWorkspace.remote(tab, tab === 'files' ? this.currentPath : null);
+            return;
+        }
         const params = new URLSearchParams();
         params.set('tab', tab);
 
@@ -5856,7 +5910,7 @@ volumes:
 
 // Initialize app
 let app;
-document.addEventListener('DOMContentLoaded', () => {
+(window.RemoteToolOnReady || (callback => document.addEventListener('DOMContentLoaded', callback))) (() => {
     app = new RemoteControl();
     window.remoteControl = app;
     // 文件管理器“在当前目录运行控制台”按钮功能

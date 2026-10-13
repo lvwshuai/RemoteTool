@@ -1,0 +1,39 @@
+# XcodeGen 备用工程定义。
+# 只有在不想使用随仓库提供的 RemoteTooliOS.xcodeproj 时才需要它：
+#   brew install xcodegen && cd ios && xcodegen generate
+# 生成结果与仓库内的工程等价（Debug 用 Config/RemoteTooliOS-Info-Debug.plist，Release 用 Config/RemoteTooliOS-Info.plist）。
+name: RemoteTooliOS
+options:
+  bundleIdPrefix: com.chuckiehelper
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  developmentLanguage: zh-Hans
+
+targets:
+  RemoteTooliOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: RemoteTooliOS
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.3.36"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_PREVIEWS: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_KEY_UIStatusBarStyle: UIStatusBarStyleLightContent
+        CODE_SIGN_STYLE: Automatic
+      configs:
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.chuckiehelper.mobile.dev
+          INFOPLIST_FILE: Config/RemoteTooliOS-Info-Debug.plist
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+          SWIFT_OPTIMIZATION_LEVEL: "-Onone"
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: com.chuckiehelper.mobile.ios
+          INFOPLIST_FILE: Config/RemoteTooliOS-Info.plist
+          SWIFT_COMPILATION_MODE: wholemodule
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
